@@ -23,7 +23,7 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(rpg_mpc)
 
-find_package(catkin_simple REQUIRED)
+find_package(catkin_simple REQUIRED Boost COMPONENTS thread)
 
 catkin_simple()
 
@@ -66,7 +66,9 @@ target_include_directories(mpc_solver PUBLIC
   model/quadrotor_mpc_codegen/
   externals/qpoases
   externals/qpoases/INCLUDE
-  externals/qpoases/SRC)
+  externals/qpoases/SRC
+  /home/j/catkin_ws/build/mavlink/include/v2.0/common
+  ${Boost_INCLUDE_DIRS})
 
 cs_add_library(mpc_wrapper
   src/mpc_wrapper.cpp)
@@ -86,6 +88,8 @@ cs_export()
 
 cs_add_executable(mpc_controller_node
   test/mpc_node.cpp)
+cs_add_executable(offb_node
+  test/offb_node.cpp)
 target_link_libraries(mpc_controller_node
   mpc_controller
   mpc_wrapper

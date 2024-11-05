@@ -22,12 +22,7 @@
 
 
 <launch>
-  <arg name="quad_name" />
-  <group ns="$(arg quad_name)" >
-
-    <node pkg="rpg_mpc" type="mpc_controller_node" name="mpc_controller_node" output="screen" >
-      <rosparam file="$(find rpg_mpc)/parameters/default.yaml" />
-    </node>
-
-  </group>
+  <node pkg="rpg_mpc" type="mpc_controller_node" name="mpc_controller_node" output="screen" >
+    <rosparam file="$(find rpg_mpc)/parameters/default.yaml" />
+  </node>
 </launch>

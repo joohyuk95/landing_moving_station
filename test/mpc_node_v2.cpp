@@ -103,24 +103,19 @@ quadrotor_common::TrajectoryPoint getFakePoint(double target_vel) {
   quadrotor_common::TrajectoryPoint target_point;
   
   target_point.position.y() = 0.0;
-  target_point.position.z() = 2.0;
+  target_point.position.z() = 5.0;
 
   double now = ros::Time::now().toSec();
   double duration = now - start_time;
 
   target_point.position.x() = 20.0 + target_vel*duration;
-  
-  target_point.velocity.x() = 3.0;
-  target_point.velocity.y() = 0.0;
-  target_point.velocity.z() = 0.0;
 
   return target_point;
 }
 
-quadrotor_common::Trajectory getDynamicReferenceTrajectory(quadrotor_common::QuadStateEstimate& state_estimate, quadrotor_common::TrajectoryPoint& end_state) {
+quadrotor_common::Trajectory getDynamicReferenceTrajectory(Eigen::Vector3d& start, quadrotor_common::TrajectoryPoint& end_state) {
   Eigen::Vector3d end = end_state.position;
   
-  Eigen::Vector3d start = state_estimate.position;
   start.x() += 3.0;
   if (start.z() < end.z() + 1.0) {
     start.z() = end.z();
@@ -130,7 +125,6 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory(quadrotor_common::Qua
 
   quadrotor_common::TrajectoryPoint start_state;
   start_state.position = start;
-  start_state.velocity = state_estimate.velocity;
 
   double wpt_x = (start.x() + end.x()) / 2;
   double wpt_y = (start.y() + end.y()) / 2;
@@ -144,8 +138,7 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory(quadrotor_common::Qua
   minimization_weights << 8, 3, 3;
   
   Eigen::VectorXd segtime(2);
-  double seg = (end.x() - start.x()) / 4.0 / 2;
-  segtime << seg, seg;
+  segtime << 3, 3;
 
   polynomial_trajectories::PolynomialTrajectorySettings a;
   a.way_points = waypoint;
@@ -314,35 +307,6 @@ visualization_msgs::Marker visualizer1(quadrotor_common::TrajectoryPoint& msg) {
     return point_marker; // Return the constructed marker
 }
 
-visualization_msgs::Marker visualizer11(quadrotor_common::TrajectoryPoint& msg) { // Fake target (cube type)
-    // Create a Marker for the path points (visualized as spheres)
-    visualization_msgs::Marker point_marker;
-    point_marker.header.frame_id = "map"; // Set the frame ID
-    point_marker.header.stamp = ros::Time::now(); // Set the current time
-    point_marker.ns = "moving_object"; // Namespace
-    point_marker.id = 0; // Unique ID for this marker
-    point_marker.type = visualization_msgs::Marker::CUBE; // Use SPHERE_LIST type
-    point_marker.action = visualization_msgs::Marker::ADD; // Action to add marker
-
-    point_marker.pose.position.x = msg.position.x();
-    point_marker.pose.position.y = msg.position.y();
-    point_marker.pose.position.z = msg.position.z();
-    point_marker.pose.orientation.w = 1.0;
-
-    // Set the scale of the spheres
-    point_marker.scale.x = 1.0;  // Radius of each sphere
-    point_marker.scale.y = 1.0;
-    point_marker.scale.z = 0.1;
-
-    // Set the color of the spheres (red)
-    point_marker.color.r = 1.0;
-    point_marker.color.g = 1.0;
-    point_marker.color.b = 0.0;
-    point_marker.color.a = 1.0; // Fully opaque
-
-    return point_marker; // Return the constructed marker
-}
-
 visualization_msgs::MarkerArray visualizer2(std::vector<Eigen::Vector3d>& msg) { // Waypoints
     // Create a Marker for the path points (visualized as spheres)
     visualization_msgs::MarkerArray waypoints;
@@ -400,7 +364,6 @@ int main(int argc, char **argv)
   ros::Publisher marker_array_pub_ = nh.advertise<visualization_msgs::MarkerArray>("/visualization_marker_array", 10);
   ros::Publisher marker_array_pub_1 = nh.advertise<visualization_msgs::MarkerArray>("/visualization_marker_array1", 10);
   ros::Publisher marker_pub = nh.advertise<visualization_msgs::Marker>("/visualization_marker", 10);
-  ros::Publisher marker_pub_ = nh.advertise<visualization_msgs::Marker>("/visualization_marker1", 10);
   double rate = 50.0;
   ros::Rate loop_rate(rate);
   
@@ -438,13 +401,9 @@ int main(int argc, char **argv)
   while (ros::ok() && criteria > 3.0) {
     ros::Time time = ros::Time::now();
     path_msg.header.stamp = time;
-    end_point = getFakePoint(3.0);    
-
-    reference_trajectory = getDynamicReferenceTrajectory(state_estimate, end_point);
+    end_point = getFakePoint(3.0);
+    reference_trajectory = getDynamicReferenceTrajectory(state_estimate.position, end_point);
     criteria = abs(end_point.position.x() - state_estimate.position.x());
-    end_point.position.z() = 0.0;
-    visualization_msgs::Marker end = visualizer11(end_point);
-    marker_pub_.publish(end);
 
     visualization_msgs::MarkerArray wpt = visualizer2(waypoint);
     marker_array_pub_1.publish(wpt);
@@ -473,16 +432,12 @@ int main(int argc, char **argv)
     double s_T = ros::Time::now().toSec();
     double c_T = ros::Time::now().toSec();
     while (ros::ok() && c_T - s_T < 0.5) {
-      quadrotor_common::TrajectoryPoint e_p = getFakePoint(3.0);
-      e_p.position.z() = 0.0;
-      visualization_msgs::Marker end = visualizer11(e_p);
-      marker_pub_.publish(end);
 
       quadrotor_common::TrajectoryPoint reference_point = reference_trajectory.points.front();
       visualization_msgs::Marker target = visualizer1(reference_point);
       marker_pub.publish(target);
 
-      double vel_gain = 5.0;
+      double vel_gain = 4.0;
       Eigen::Vector3d vector_current_reference = reference_point.position - state_estimate.position;
       auto& vector = vector_current_reference.normalized();
       auto& vel_vector = vel_gain * vector;
@@ -511,59 +466,7 @@ int main(int argc, char **argv)
       c_T = ros::Time::now().toSec();
     }
   }
-  ROS_INFO("parallel flight");
-  double s_T = ros::Time::now().toSec();
-  double c_T = ros::Time::now().toSec();
-  geometry_msgs::TwistStamped vel_com;
-  vel_com.twist.linear.x = 5.0;
-  vel_com.twist.linear.y = 0.0;
-  vel_com.twist.linear.z = 0.0;
-  local_vel_pub.publish(vel_com);
-  
-  quadrotor_common::TrajectoryPoint e_p = getFakePoint(3.0);
-  double d = e_p.position.x() - state_estimate.position.x();
-  double v_c = state_estimate.velocity.x();
-  // v_c = 4.0;
-  double t_m = 2*d / (v_c - 3);
-  std::cout << "d: " << d << std::endl;
-  std::cout << "v_c: " << v_c << std::endl;
-  std::cout << "t_m: " << t_m << std::endl;
-
-  while (c_T - s_T <= t_m) {
-    e_p = getFakePoint(3.0);
-    e_p.position.z() = 0.0;
-    visualization_msgs::Marker end = visualizer11(e_p);
-    marker_pub_.publish(end);
-
-    vel_com.twist.linear.x = -(v_c - 3)/t_m*(c_T - s_T)+ v_c;
-    vel_com.twist.linear.y = 0.0;
-    vel_com.twist.linear.z = 0.0;
-    local_vel_pub.publish(vel_com);
-    ros::spinOnce();
-    loop_rate.sleep();
-    c_T = ros::Time::now().toSec();
-  }
-  
-  ROS_INFO("decending");
-  while (c_T - s_T < 4.0) {
-    e_p = getFakePoint(3.0);
-    e_p.position.z() = 0.0;
-    visualization_msgs::Marker end = visualizer11(e_p);
-    marker_pub_.publish(end);
-    vel_com.twist.linear.x = 3.0;
-    vel_com.twist.linear.y = 0.0;
-    vel_com.twist.linear.z = -0.5;
-    local_vel_pub.publish(vel_com);
-    ros::spinOnce();
-    loop_rate.sleep();
-    c_T = ros::Time::now().toSec();
-  }
-  
   send_force_disarm(nh);
-  e_p = getFakePoint(3.0);
-  e_p.position.z() = 0.0;
-  visualization_msgs::Marker end = visualizer11(e_p);
-  marker_pub_.publish(end);
-  
+
   return 0;
 }

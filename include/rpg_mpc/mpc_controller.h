@@ -121,8 +121,8 @@ private:
   ros::NodeHandle pnh_;
 
   // Subscribers and publisher.
-  ros::Subscriber sub_point_of_interest_;
-  ros::Subscriber sub_autopilot_off_;
+  // ros::Subscriber sub_point_of_interest_;
+  // ros::Subscriber sub_autopilot_off_;
   ros::Publisher pub_predicted_trajectory_;
 
   // Parameters

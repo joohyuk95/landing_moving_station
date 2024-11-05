@@ -46,10 +46,10 @@ MpcController<T>::MpcController(
   pub_predicted_trajectory_ =
       nh_.advertise<nav_msgs::Path>(topic, 1);
 
-  sub_point_of_interest_ = nh_.subscribe("mpc/point_of_interest", 1,
-                                         &MpcController<T>::pointOfInterestCallback, this);
-  sub_autopilot_off_ = nh_.subscribe("autopilot/off", 1,
-                                     &MpcController<T>::offCallback, this);
+  // sub_point_of_interest_ = nh_.subscribe("mpc/point_of_interest", 1,
+  //                                        &MpcController<T>::pointOfInterestCallback, this);
+  // sub_autopilot_off_ = nh_.subscribe("autopilot/off", 1,
+  //                                    &MpcController<T>::offCallback, this);
 
   if (!params_.loadParameters(pnh_)) {
     ROS_ERROR("[%s] Could not load parameters.", pnh_.getNamespace().c_str());
@@ -62,29 +62,29 @@ MpcController<T>::MpcController(
   preparation_thread_ = std::thread(&MpcWrapper<T>::prepare, mpc_wrapper_);
 }
 
-template<typename T>
-void MpcController<T>::pointOfInterestCallback(
-    const geometry_msgs::PointStamped::ConstPtr& msg) {
-  point_of_interest_(0) = msg->point.x;
-  point_of_interest_(1) = msg->point.y;
-  point_of_interest_(2) = msg->point.z;
-  mpc_wrapper_.setPointOfInterest(point_of_interest_);
-}
+// template<typename T>
+// void MpcController<T>::pointOfInterestCallback(
+//     const geometry_msgs::PointStamped::ConstPtr& msg) {
+//   point_of_interest_(0) = msg->point.x;
+//   point_of_interest_(1) = msg->point.y;
+//   point_of_interest_(2) = msg->point.z;
+//   mpc_wrapper_.setPointOfInterest(point_of_interest_);
+// }
 
-template<typename T>
-void MpcController<T>::offCallback(
-    const std_msgs::Empty::ConstPtr& msg) {
-  solve_from_scratch_ = true;
-}
+// template<typename T>
+// void MpcController<T>::offCallback(
+//     const std_msgs::Empty::ConstPtr& msg) {
+//   solve_from_scratch_ = true;
+// }
 
-template<typename T>
-quadrotor_common::ControlCommand MpcController<T>::off() {
-  quadrotor_common::ControlCommand command;
+// template<typename T>
+// quadrotor_common::ControlCommand MpcController<T>::off() {
+//   quadrotor_common::ControlCommand command;
 
-  command.zero();
+//   command.zero();
 
-  return command;
-}
+//   return command;
+// }
 
 template<typename T>
 quadrotor_common::ControlCommand MpcController<T>::run(
@@ -131,7 +131,8 @@ quadrotor_common::ControlCommand MpcController<T>::run(
   if (params_.print_info_)
     ROS_INFO_THROTTLE(1.0, "MPC Timing: Latency: %1.1f ms  |  Total: %1.1f ms",
                       timing_feedback_ * 1000, (timing_feedback_ + timing_preparation_) * 1000);
-
+  // std::cout << "state : " << predicted_states_ << std::endl;
+  // std::cout << "input : " << predicted_inputs_ << std::endl;
   // Return the input control command.
   return updateControlCommand(predicted_states_.col(0),
                               predicted_inputs_.col(0),
@@ -260,7 +261,7 @@ bool MpcController<T>::publishPrediction(
     ros::Time& time) {
   nav_msgs::Path path_msg;
   path_msg.header.stamp = time;
-  path_msg.header.frame_id = "world";
+  path_msg.header.frame_id = "map";
   geometry_msgs::PoseStamped pose;
   T dt = mpc_wrapper_.getTimestep();
 

@@ -30,8 +30,10 @@
 #include <mavros_msgs/AttitudeTarget.h>
 #include <mavros_msgs/State.h>
 #include <mavros_msgs/SetMode.h>
+#include "geometry_msgs/Point.h"
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TwistStamped.h>
+#include <std_msgs/Float64.h>
 #include <polynomial_trajectories/polynomial_trajectory_settings.h>
 #include <trajectory_generation_helper/heading_trajectory_helper.h>
 #include <trajectory_generation_helper/polynomial_trajectory_helper.h>
@@ -50,8 +52,24 @@ double start_time = 0;
 std::mutex mtx;
 
 mavros_msgs::State current_state;
+geometry_msgs::Point station_pos;
+geometry_msgs::TwistStamped station_vel;
+double hdg;
+
 void state_cb(const mavros_msgs::State::ConstPtr& msg){
     current_state = *msg;
+}
+
+void enu_pos_cb(const geometry_msgs::Point::ConstPtr& msg){
+    station_pos = *msg;
+}
+
+void enu_vel_cb(const geometry_msgs::TwistStamped::ConstPtr& msg){
+    station_vel = *msg;
+}
+
+void hdg_cb(const std_msgs::Float64::ConstPtr& msg) {
+    hdg = msg->data;
 }
 
 visualization_msgs::MarkerArray visualizer2(std::vector<Eigen::Vector3d>& msg);
@@ -102,45 +120,96 @@ void send_force_disarm(ros::NodeHandle &nh) {
   }
 }
 
-quadrotor_common::TrajectoryPoint getFakePoint(double target_vel) {
+constexpr double degreesToRadians(double degrees) {
+    return degrees * M_PI / 180.0;
+}
+
+Eigen::Vector2d getENUUnitVector() {
+    // Convert azimuth angle to radians
+    double azimuth_radians = degreesToRadians(hdg);
+
+    // Calculate East (x) and North (y) components
+    double east = sin(azimuth_radians);  // x component (East)
+    double north = cos(azimuth_radians); // y component (North)
+
+    // Return the unit vector in the EN plane
+    return Eigen::Vector2d(east, north);
+}
+
+Eigen::Vector2d findFootOfPerpendicular(const Eigen::Vector3d& last_target) {
+
+    Eigen::Vector2d linePoint(station_pos.x, station_pos.y);
+    Eigen::Vector2d direction = getENUUnitVector();
+    Eigen::Vector2d point(last_target.x(), last_target.y());
+
+    // Calculate the vector from linePoint to the point
+    Eigen::Vector2d PQ = point - linePoint;
+    
+    // Project PQ onto the direction vector
+    double projectionLength = PQ.dot(direction) / direction.dot(direction);
+    Eigen::Vector2d projection = projectionLength * direction;
+    
+    // The foot of the perpendicular
+    Eigen::Vector2d foot = linePoint + projection;
+    
+    return foot;
+}
+
+quadrotor_common::TrajectoryPoint getFakePoint(double target_vel) { // read target position
   quadrotor_common::TrajectoryPoint target_point;
-  
-  target_point.position.y() = 0.0;
+  target_vel = 5.0;
+  target_point.position.x() = station_pos.x;
+  target_point.position.y() = station_pos.y;
   target_point.position.z() = 2.0;
 
-  double now = ros::Time::now().toSec();
-  double duration = now - start_time;
+  Eigen::Vector2d vec = getENUUnitVector();
+  auto& vector = vec.normalized();
+  auto& vel = target_vel * vector;
 
-  target_point.position.x() = 20.0 + target_vel*duration;
-  
-  target_point.velocity.x() = target_vel;
-  target_point.velocity.y() = 0.0;
+  target_point.velocity.x() = vel.x();
+  target_point.velocity.y() = vel.y();
   target_point.velocity.z() = 0.0;
 
   return target_point;
 }
 
-quadrotor_common::Trajectory getDynamicReferenceTrajectory(quadrotor_common::QuadStateEstimate& state_estimate, quadrotor_common::TrajectoryPoint& end_state) {
-  Eigen::Vector3d end = end_state.position;
+// quadrotor_common::TrajectoryPoint getFakePoint(double target_vel) {  // virtual point
+//   quadrotor_common::TrajectoryPoint target_point;
   
-  Eigen::Vector3d start = state_estimate.position;
-  // start.x() += 3.0;
-  // if (start.z() < end.z() + 1.0) {
-  //   start.z() = end.z();
-  // } else {
-  //   start.z() -= 1.0;
-  // }
+//   target_point.position.y() = 0.0;
+//   target_point.position.z() = 2.0;
 
+//   double now = ros::Time::now().toSec();
+//   double duration = now - start_time;
+
+//   target_point.position.x() = 20.0 + target_vel*duration;
+  
+//   target_point.velocity.x() = target_vel;
+//   target_point.velocity.y() = 0.0;
+//   target_point.velocity.z() = 0.0;
+
+//   return target_point;
+// }
+
+quadrotor_common::Trajectory getDynamicReferenceTrajectory(quadrotor_common::QuadStateEstimate& state_estimate, quadrotor_common::TrajectoryPoint& end_state) { // 현재 위치를 경로 시작점으로
+  Eigen::Vector3d end = end_state.position;
+  Eigen::Vector3d start = state_estimate.position;
+  
+  double tracking_vel = 5.0;
   quadrotor_common::TrajectoryPoint start_state;
   start_state.position = start;
-  start_state.velocity = state_estimate.velocity;
-  start_state.velocity.z() = 0.0;
+  // start_state.velocity = state_estimate.velocity;
+  // start_state.velocity.z() = 0.0;
+  Eigen::Vector2d foot_pt = findFootOfPerpendicular(start);
 
-  double wpt_x = (start.x() + end.x()) / 2;
-  double wpt_y = (start.y() + end.y()) / 2;
-  double wpt_z = (start.z() + end.z()) / 2;
+  double wpt_x = (2*foot_pt.x() + end.x()) / 3;
+  double wpt_y = (2*foot_pt.y() + end.y()) / 3;
+  double wpt_z = (2*start.z() + end.z()) / 3;
 
   Eigen::Vector3d wpt(wpt_x, wpt_y, wpt_z);
+
+  start_state.velocity = tracking_vel*((wpt - start).normalized());
+
   waypoint.clear();
   waypoint.push_back(wpt);
   
@@ -148,14 +217,14 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory(quadrotor_common::Qua
   minimization_weights << 8, 3, 3;
   
   Eigen::VectorXd segtime(2);
-  double seg = (end.x() - start.x()) / 4.0 / 2;
-  segtime << seg, seg;
+  double seg = ((end - start).norm() / 5.0) / 3;
+  segtime << 2*seg, seg;
 
   polynomial_trajectories::PolynomialTrajectorySettings a;
   a.way_points = waypoint;
   a.minimization_weights = minimization_weights;
-  a.polynomial_order = 7;
-  a.continuity_order = 4;
+  a.polynomial_order = 6;
+  a.continuity_order = 3;
   
   quadrotor_common::Trajectory dynamic_traj = trajectory_generation_helper::polynomials::generateMinimumSnapTrajectory(
     segtime, start_state, end_state, a, 10);
@@ -166,16 +235,21 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory(quadrotor_common::Qua
   return dynamic_traj;
 }
 
+// 이전 경로의 마지막 target point를 경로 시작점으로
 quadrotor_common::Trajectory getDynamicReferenceTrajectory2(quadrotor_common::QuadStateEstimate& state_estimate, quadrotor_common::TrajectoryPoint& start_state, quadrotor_common::TrajectoryPoint& end_state) {
   Eigen::Vector3d start = start_state.position;
-  start_state.velocity = state_estimate.velocity;
+  // start_state.velocity = state_estimate.velocity;
   Eigen::Vector3d end = end_state.position;
+  double tracking_vel = 5.0;
+  Eigen::Vector2d foot_pt = findFootOfPerpendicular(start);
 
-  double wpt_x = (start.x() + end.x()) / 2;
-  double wpt_y = (start.y() + end.y()) / 2;
-  double wpt_z = (start.z() + end.z()) / 2;
+  double wpt_x = (2*foot_pt.x() + end.x()) / 3;
+  double wpt_y = (2*foot_pt.y() + end.y()) / 3;
+  double wpt_z = (2*start.z() + end.z()) / 3;
 
   Eigen::Vector3d wpt(wpt_x, wpt_y, wpt_z);
+  start_state.velocity = tracking_vel*((wpt - start).normalized());
+
   waypoint.clear();
   waypoint.push_back(wpt);
   
@@ -183,14 +257,14 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory2(quadrotor_common::Qu
   minimization_weights << 8, 3, 3;
   
   Eigen::VectorXd segtime(2);
-  double seg = (end.x() - start.x()) / 4.0 / 2;
-  segtime << seg, seg;
+  double seg = ((end - start).norm() / 5.0) / 3;
+  segtime << 2*seg, seg;
 
   polynomial_trajectories::PolynomialTrajectorySettings a;
   a.way_points = waypoint;
   a.minimization_weights = minimization_weights;
-  a.polynomial_order = 7;
-  a.continuity_order = 4;
+  a.polynomial_order = 6;
+  a.continuity_order = 3;
   
   quadrotor_common::Trajectory dynamic_traj = trajectory_generation_helper::polynomials::generateMinimumSnapTrajectory(
     segtime, start_state, end_state, a, 10);
@@ -390,6 +464,9 @@ int main(int argc, char **argv)
   ros::Subscriber state_sub = nh.subscribe<nav_msgs::Odometry>("mavros/local_position/odom", 10, [&state_estimate](const nav_msgs::Odometry::ConstPtr& msg)
                                                                 {stateCallback(msg, state_estimate);}
                                                               );
+  ros::Subscriber ros_enu_pos_sub = nh.subscribe<geometry_msgs::Point>("station_enu", 10, enu_pos_cb);
+  ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("gps_vel", 10, enu_vel_cb);
+  ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("compass_hdg", 10, hdg_cb);
 
   ros::Publisher input_pub = nh.advertise<mavros_msgs::AttitudeTarget>("mavros/setpoint_raw/attitude", 10);
   ros::Publisher local_pos_pub = nh.advertise<geometry_msgs::PoseStamped>("mavros/setpoint_position/local", 10);
@@ -450,11 +527,11 @@ int main(int argc, char **argv)
   quadrotor_common::TrajectoryPoint reference_point;
   bool is_first = true;
 
-  double criteria = abs(end_point.position.x() - state_estimate.position.x()); // x축 기준 거리가 3m 보다 멀면 계속 추종
-  while (ros::ok() && criteria > 4.0) {
+  double criteria = (end_point.position - state_estimate.position).norm();
+  while (ros::ok() && criteria > 5.0) {
     ros::Time time = ros::Time::now();
     path_msg.header.stamp = time;
-    end_point = getFakePoint(3.0);    
+    end_point = getFakePoint(3.0);
 
     if (is_first) {
       reference_trajectory = getDynamicReferenceTrajectory(state_estimate, end_point);
@@ -531,7 +608,7 @@ int main(int argc, char **argv)
       loop_rate.sleep();
       c_T = ros::Time::now().toSec();
     }
-    criteria = abs(end_point.position.x() - state_estimate.position.x());
+    criteria = (end_point.position - state_estimate.position).norm();
   }
   ROS_INFO("parallel flight");
   double s_T = ros::Time::now().toSec();

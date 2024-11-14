@@ -46,6 +46,8 @@
 #include <mavlink.h>
 #include <thread>
 #include <mutex>
+#include <vector>
+#include <cmath>
 
 std::vector<Eigen::Vector3d> waypoint;
 double start_time = 0;
@@ -55,6 +57,26 @@ mavros_msgs::State current_state;
 geometry_msgs::Point station_pos;
 geometry_msgs::TwistStamped station_vel;
 double hdg;
+double hd;
+
+class PID {
+public:
+    PID(double kp, double ki, double kd) : kp_(kp), ki_(ki), kd_(kd), prev_error_(0.0), integral_(0.0) {}
+
+    double calculate(double setpoint, double current, double dt) {
+        double error = setpoint - current;
+        integral_ += error * dt;
+        double derivative = (error - prev_error_) / dt;
+        prev_error_ = error;
+
+        return kp_ * error + ki_ * integral_ + kd_ * derivative;
+    }
+
+private:
+    double kp_, ki_, kd_;
+    double prev_error_, integral_;
+};
+
 
 void state_cb(const mavros_msgs::State::ConstPtr& msg){
     current_state = *msg;
@@ -70,6 +92,10 @@ void enu_vel_cb(const geometry_msgs::TwistStamped::ConstPtr& msg){
 
 void hdg_cb(const std_msgs::Float64::ConstPtr& msg) {
     hdg = msg->data;
+}
+
+void hd_cb(const std_msgs::Float64::ConstPtr& msg) {
+    hd = msg->data;
 }
 
 visualization_msgs::MarkerArray visualizer2(std::vector<Eigen::Vector3d>& msg);
@@ -134,6 +160,14 @@ Eigen::Vector2d getENUUnitVector() {
 
     // Return the unit vector in the EN plane
     return Eigen::Vector2d(east, north);
+}
+
+double getAzimuth(const double& east, const double& north) {
+  double azimuth = atan2(east, north) * (180.0 / M_PI);
+  if (azimuth < 0) {
+    azimuth += 360;
+  }
+  return azimuth;
 }
 
 Eigen::Vector2d findFootOfPerpendicular(const Eigen::Vector3d& last_target) {
@@ -218,7 +252,7 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory(quadrotor_common::Qua
   
   Eigen::VectorXd segtime(2);
   double seg = ((end - start).norm() / 5.0) / 3;
-  segtime << 2*seg, seg;
+  segtime << seg, 2*seg;
 
   polynomial_trajectories::PolynomialTrajectorySettings a;
   a.way_points = waypoint;
@@ -235,7 +269,7 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory(quadrotor_common::Qua
   return dynamic_traj;
 }
 
-// 이전 경로의 마지막 target point를 경로 시작점으로
+// 이전 경로의 마지막 target point를 다음 경로 시작점으로
 quadrotor_common::Trajectory getDynamicReferenceTrajectory2(quadrotor_common::QuadStateEstimate& state_estimate, quadrotor_common::TrajectoryPoint& start_state, quadrotor_common::TrajectoryPoint& end_state) {
   Eigen::Vector3d start = start_state.position;
   // start_state.velocity = state_estimate.velocity;
@@ -258,7 +292,7 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory2(quadrotor_common::Qu
   
   Eigen::VectorXd segtime(2);
   double seg = ((end - start).norm() / 5.0) / 3;
-  segtime << 2*seg, seg;
+  segtime << seg, 2*seg;
 
   polynomial_trajectories::PolynomialTrajectorySettings a;
   a.way_points = waypoint;
@@ -467,6 +501,7 @@ int main(int argc, char **argv)
   ros::Subscriber ros_enu_pos_sub = nh.subscribe<geometry_msgs::Point>("station_enu", 10, enu_pos_cb);
   ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("gps_vel", 10, enu_vel_cb);
   ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("compass_hdg", 10, hdg_cb);
+  ros::Subscriber hdg_sub = nh.subscribe<std_msgs::Float64>("mavros/global_position/compass_hdg", 10, hd_cb);
 
   ros::Publisher input_pub = nh.advertise<mavros_msgs::AttitudeTarget>("mavros/setpoint_raw/attitude", 10);
   ros::Publisher local_pos_pub = nh.advertise<geometry_msgs::PoseStamped>("mavros/setpoint_position/local", 10);
@@ -481,6 +516,8 @@ int main(int argc, char **argv)
   double rate = 20.0;
   ros::Rate loop_rate(rate);
   
+  PID pid_yaw(1.0, 0.0, 0.1);
+
   // wait until connect to controller
   while(ros::ok() && !current_state.connected){
     ROS_INFO("connecting...");
@@ -578,6 +615,25 @@ int main(int argc, char **argv)
       marker_pub_.publish(end);
 
       reference_point = reference_trajectory.points.front();
+      Eigen::Quaterniond q = reference_point.orientation;
+      q.normalize();  // Make sure the quaternion is normalized
+
+      // Convert to rotation matrix
+      Eigen::Matrix3d rotationMatrix = q.toRotationMatrix();
+
+      // Extract Euler angles from rotation matrix (roll, pitch, yaw)
+      double roll = std::atan2(rotationMatrix(2, 1), rotationMatrix(2, 2));
+      double pitch = std::asin(-rotationMatrix(2, 0));
+      double yaw = std::atan2(rotationMatrix(1, 0), rotationMatrix(0, 0));
+
+      std::cout << "---" << '\n';
+      Eigen::Vector3d pos = reference_point.position;
+      Eigen::Vector3d vel = reference_point.velocity;
+      double head = reference_point.heading;
+      std::cout << "position: " << pos.x() << ", " << pos.y() << ", " << pos.z() << '\n';
+      std::cout << "euler   : " << vel.x() << ", " << vel.y() << ", " << vel.z() << '\n';
+      std::cout << "velocity: " << roll << ", " << pitch << ", " << yaw << '\n';
+      std::cout << "heading : " << head << '\n';
       visualization_msgs::Marker target = visualizer1(reference_point);
       marker_pub.publish(target);
 
@@ -586,11 +642,29 @@ int main(int argc, char **argv)
       auto& vector = vector_current_reference.normalized();
       auto& vel_vector = vel_gain * vector;
 
+      double target_hdg = getAzimuth(vector.x(), vector.y());
+      double current_hdg = hd;
+      double delta_yaw = target_hdg - current_hdg;
+      if (abs(delta_yaw) > 180) {
+        if (delta_yaw > 0) {
+          delta_yaw -= 360;
+        } else {
+          delta_yaw += 360;
+        }
+      }
+      double current_yaw = target_hdg + delta_yaw;
+      current_yaw *= (M_PI/180);
+      target_hdg *= (M_PI/180);
+      std::cout << "curr_yaw: " << current_yaw << '\n';
+      std::cout << "target_yaw: " << target_hdg << '\n';
+      double yaw_command = pid_yaw.calculate(target_hdg, current_yaw, 0.05);
+
       geometry_msgs::TwistStamped vel_com;
       vel_com.twist.linear.x = vel_vector.x();
       vel_com.twist.linear.y = vel_vector.y();
       vel_com.twist.linear.z = vel_vector.z();
-
+      vel_com.twist.angular.z = yaw_command;
+      std::cout << "yaw_command: " << yaw_command << '\n';
       double dist_reference = vector_current_reference.norm();
       // std::cout << "state: " << "x: " <<  state_estimate.position.x() << ", y: " <<  state_estimate.position.y() << ", z: " <<  state_estimate.position.z() << '\n';
       // std::cout << "refer: " << "x: " <<  reference_point.position.x() << ", y: " <<  reference_point.position.y() << ", z: " <<  reference_point.position.z() << '\n';
@@ -610,54 +684,54 @@ int main(int argc, char **argv)
     }
     criteria = (end_point.position - state_estimate.position).norm();
   }
-  ROS_INFO("parallel flight");
-  double s_T = ros::Time::now().toSec();
-  double c_T = ros::Time::now().toSec();
-  geometry_msgs::TwistStamped vel_com;
-  // vel_com.twist.linear.x = 5.0;
-  // vel_com.twist.linear.y = 0.0;
-  // vel_com.twist.linear.z = 0.0;
-  // local_vel_pub.publish(vel_com);
+  // ROS_INFO("parallel flight");
+  // double s_T = ros::Time::now().toSec();
+  // double c_T = ros::Time::now().toSec();
+  // geometry_msgs::TwistStamped vel_com;
+  // // vel_com.twist.linear.x = 5.0;
+  // // vel_com.twist.linear.y = 0.0;
+  // // vel_com.twist.linear.z = 0.0;
+  // // local_vel_pub.publish(vel_com);
   
-  quadrotor_common::TrajectoryPoint e_p = getFakePoint(3.0);
-  double d = e_p.position.x() - state_estimate.position.x();
-  double v_c = state_estimate.velocity.x();
-  // v_c = 4.0;
-  double t_m = 2*d / (v_c - 3);
-  // std::cout << "d: " << d << std::endl;
-  std::cout << "v_c: " << v_c << std::endl;
-  // std::cout << "t_m: " << t_m << std::endl;
+  // quadrotor_common::TrajectoryPoint e_p = getFakePoint(3.0);
+  // double d = e_p.position.x() - state_estimate.position.x();
+  // double v_c = state_estimate.velocity.x();
+  // // v_c = 4.0;
+  // double t_m = 2*d / (v_c - 3);
+  // // std::cout << "d: " << d << std::endl;
+  // std::cout << "v_c: " << v_c << std::endl;
+  // // std::cout << "t_m: " << t_m << std::endl;
 
-  while (c_T - s_T <= t_m) {
-    // e_p = getFakePoint(3.0);
-    // e_p.position.z() = 0.0;
-    // visualization_msgs::Marker end = visualizer11(e_p);
-    // marker_pub_.publish(end);
+  // while (c_T - s_T <= t_m) {
+  //   // e_p = getFakePoint(3.0);
+  //   // e_p.position.z() = 0.0;
+  //   // visualization_msgs::Marker end = visualizer11(e_p);
+  //   // marker_pub_.publish(end);
 
-    vel_com.twist.linear.x = -1.2*(v_c - 3)/t_m*(c_T - s_T)+ v_c;
-    vel_com.twist.linear.y = 0.0;
-    vel_com.twist.linear.z = 0.0;
-    local_vel_pub.publish(vel_com);
-    ros::spinOnce();
-    loop_rate.sleep();
-    c_T = ros::Time::now().toSec();
-  }
+  //   vel_com.twist.linear.x = -1.2*(v_c - 3)/t_m*(c_T - s_T)+ v_c;
+  //   vel_com.twist.linear.y = 0.0;
+  //   vel_com.twist.linear.z = 0.0;
+  //   local_vel_pub.publish(vel_com);
+  //   ros::spinOnce();
+  //   loop_rate.sleep();
+  //   c_T = ros::Time::now().toSec();
+  // }
   
-  s_T = ros::Time::now().toSec();
-  ROS_INFO("decending");
-  while (c_T - s_T < 4.0) {
-    // e_p = getFakePoint(3.0);
-    // e_p.position.z() = 0.0;
-    // visualization_msgs::Marker end = visualizer11(e_p);
-    // marker_pub_.publish(end);
-    vel_com.twist.linear.x = 3.0;
-    vel_com.twist.linear.y = 0.0;
-    vel_com.twist.linear.z = -0.5;
-    local_vel_pub.publish(vel_com);
-    ros::spinOnce();
-    loop_rate.sleep();
-    c_T = ros::Time::now().toSec();
-  }
+  // s_T = ros::Time::now().toSec();
+  // ROS_INFO("decending");
+  // while (c_T - s_T < 4.0) {
+  //   // e_p = getFakePoint(3.0);
+  //   // e_p.position.z() = 0.0;
+  //   // visualization_msgs::Marker end = visualizer11(e_p);
+  //   // marker_pub_.publish(end);
+  //   vel_com.twist.linear.x = 3.0;
+  //   vel_com.twist.linear.y = 0.0;
+  //   vel_com.twist.linear.z = -0.5;
+  //   local_vel_pub.publish(vel_com);
+  //   ros::spinOnce();
+  //   loop_rate.sleep();
+  //   c_T = ros::Time::now().toSec();
+  // }
   
   // send_force_disarm(nh);
   // e_p = getFakePoint(3.0);

@@ -1,0 +1,15 @@
+<launch>
+    <!-- Launch key.py -->
+    <node pkg="rpg_mpc" type="key.py" name="key_node" output="screen" />
+
+    <!-- Launch compass.py -->
+    <node pkg="rpg_mpc" type="compass.py" name="compass_node" output="screen" />
+
+    <node pkg="rpg_mpc" type="aruco_detector.py" name="aruco_detector" output="screen" />
+
+    <!-- Launch GPS node -->
+    <node pkg="gps_conversion_pkg" type="gps_node" name="gps_node" output="screen" />
+
+    <!-- Launch RViz -->
+    <node pkg="rviz" type="rviz" name="rviz" output="screen" args="-d $(find rpg_mpc)/test/path.rviz" />
+</launch>

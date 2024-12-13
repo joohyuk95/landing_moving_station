@@ -49,18 +49,21 @@
 #include <mutex>
 #include <vector>
 #include <cmath>
-// #include <gazebo_msgs/ModelStates.h> // SITL
-// #include <string> // SITL
+#include <gazebo_msgs/ModelStates.h> // SITL
+#include <string> // SITL
+#include <cstdlib>
 
 // #define VEL_GAIN 5.0
 #define HEIGHT_OFFSET 2.0
-#define INIT_HEIGHT 15.0
+#define INIT_HEIGHT 5.0
 #define SITL 1
+#define MARKER_OFFSET 1.0
 
 std::vector<Eigen::Vector3d> waypoint;
 // double start_time = 0;
 std::mutex mtx;
 bool parallel = false;
+bool is_detected = false;
 double vel_gain = 5.0;
 double vel_offset = 2.0;
 double vz_max = 0.7;
@@ -68,8 +71,9 @@ double vz_max = 0.7;
 mavros_msgs::State current_state;
 geometry_msgs::Point station_pos;
 geometry_msgs::TwistStamped station_vel;
-double hdg;
-double hd;
+geometry_msgs::PoseStamped aruco_pose;
+double hdg; // station heading
+double hd;  // drone heading
 
 class PID {
 public:
@@ -106,14 +110,25 @@ private:
     Eigen::Vector3d integral_;
 };
 
+void aruco_cb(const geometry_msgs::PoseStamped::ConstPtr& msg){
+    aruco_pose = *msg;
+    
+    double detect = aruco_pose.pose.orientation.z;
+    if (detect == -1) {
+      is_detected = false;
+    } else {
+      is_detected = true;
+    }
+    
+}
 
 void state_cb(const mavros_msgs::State::ConstPtr& msg){
     current_state = *msg;
 }
 
-// void enu_pos_cb(const geometry_msgs::Point::ConstPtr& msg){
-//     station_pos = *msg;
-// }
+void enu_pos_cb(const geometry_msgs::Point::ConstPtr& msg){
+    station_pos = *msg;
+}
 
 void modelStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg) {   // SITL
     std::string target_model = "husky";
@@ -234,14 +249,14 @@ Eigen::Vector2d findFootOfPerpendicular(const Eigen::Vector3d& last_target) {
 
 quadrotor_common::TrajectoryPoint getFakePoint(double target_vel) { // read target position
   quadrotor_common::TrajectoryPoint target_point;
-
-  target_point.position.x() = station_pos.x;
-  target_point.position.y() = station_pos.y;
-  target_point.position.z() = HEIGHT_OFFSET;
-
+  
   Eigen::Vector2d vec = getENUUnitVector();
   auto& vector = vec.normalized();
   auto& vel = vel_gain * vector;
+
+  target_point.position.x() = station_pos.x - (MARKER_OFFSET*vector.x());
+  target_point.position.y() = station_pos.y - (MARKER_OFFSET*vector.y());
+  target_point.position.z() = HEIGHT_OFFSET;
 
   target_point.velocity.x() = vel.x();
   target_point.velocity.y() = vel.y();
@@ -524,7 +539,11 @@ void generatorThread(ros::Publisher& station_pub, ros::Publisher& target_pub) {
       }
       end_point.position.z() = 0.0;
       visualization_msgs::Marker end = visualizer11(end_point); // 노란색 moving object
-      station_pub.publish(end);      
+      station_pub.publish(end);
+
+      if (current_state.mode != "OFFBOARD") { // terminate program if mode is changed
+        std::exit(0);
+      }
 
       ros::spinOnce();
       rate.sleep();
@@ -546,34 +565,35 @@ int main(int argc, char **argv)
   // Subscriber
 
   // SITL
-  // ros::Subscriber ros_state_sub = nh.subscribe<mavros_msgs::State>("mavros/state", 10, state_cb); // SITL
-  // ros::Subscriber state_sub = nh.subscribe<nav_msgs::Odometry>("mavros/local_position/odom", 10, [&state_estimate](const nav_msgs::Odometry::ConstPtr& msg)
-  //                                                               {stateCallback(msg, state_estimate);}
-  //                                                             ); // SITL
-  // ros::Subscriber sub = nh.subscribe("/gazebo/model_states", 10, modelStatesCallback); // SITL
-  // ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("gps_vel", 10, enu_vel_cb);
-  // ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("compass_hdg", 10, hdg_cb);
-  // ros::Subscriber hdg_sub = nh.subscribe<std_msgs::Float64>("/mavros/global_position/compass_hdg", 10, hd_cb);
+  ros::Subscriber ros_state_sub = nh.subscribe<mavros_msgs::State>("mavros/state", 10, state_cb); // SITL
+  ros::Subscriber state_sub = nh.subscribe<nav_msgs::Odometry>("mavros/local_position/odom", 10, [&state_estimate](const nav_msgs::Odometry::ConstPtr& msg)
+                                                                {stateCallback(msg, state_estimate);}
+                                                              ); // SITL
+  ros::Subscriber sub = nh.subscribe("/gazebo/model_states", 10, modelStatesCallback); // SITL
+  ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("gps_vel", 10, enu_vel_cb);
+  ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("compass_hdg", 10, hdg_cb);
+  ros::Subscriber hdg_sub = nh.subscribe<std_msgs::Float64>("/mavros/global_position/compass_hdg", 10, hd_cb);
+  ros::Subscriber aruco_sub = nh.subscribe<geometry_msgs::PoseStamped>("/aruco_marker/pose", 10, aruco_cb);
 
   // offboard
-  ros::Subscriber ros_state_sub = nh.subscribe<mavros_msgs::State>("/drone/mavros/state", 10, state_cb);
-  ros::Subscriber state_sub = nh.subscribe<nav_msgs::Odometry>("/drone/mavros/local_position/odom", 10, [&state_estimate](const nav_msgs::Odometry::ConstPtr& msg)
-                                                                {stateCallback(msg, state_estimate);}
-                                                              );
-  ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("/station/mavros/global_position/raw/gps_vel", 10, enu_vel_cb);
-  ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("/station/mavros/global_position/compass_hdg", 10, hdg_cb);
-  ros::Subscriber hdg_sub = nh.subscribe<std_msgs::Float64>("/drone/mavros/global_position/compass_hdg", 10, hd_cb);
+  // ros::Subscriber ros_state_sub = nh.subscribe<mavros_msgs::State>("/drone/mavros/state", 10, state_cb);
+  // ros::Subscriber state_sub = nh.subscribe<nav_msgs::Odometry>("/drone/mavros/local_position/odom", 10, [&state_estimate](const nav_msgs::Odometry::ConstPtr& msg)
+  //                                                               {stateCallback(msg, state_estimate);}
+  //                                                             );
+  // ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("/station/mavros/global_position/raw/gps_vel", 10, enu_vel_cb);
+  // ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("/station/mavros/global_position/compass_hdg", 10, hdg_cb);
+  // ros::Subscriber hdg_sub = nh.subscribe<std_msgs::Float64>("/drone/mavros/global_position/compass_hdg", 10, hd_cb);
   
-  //
   // ros::Subscriber ros_enu_pos_sub = nh.subscribe<geometry_msgs::Point>("station_enu", 10, enu_pos_cb);
+  // ros::Subscriber aruco_sub = nh.subscribe<geometry_msgs::PoseStamped>("/aruco_marker/pose", 10, aruco_cb);
   
   // Publisher
   
   // SITL
-  // ros::Publisher local_vel_pub = nh.advertise<geometry_msgs::TwistStamped>("/mavros/setpoint_velocity/cmd_vel", 10); // SITL
+  ros::Publisher local_vel_pub = nh.advertise<geometry_msgs::TwistStamped>("/mavros/setpoint_velocity/cmd_vel", 10); // SITL
   
   // offboard
-  ros::Publisher local_vel_pub = nh.advertise<geometry_msgs::TwistStamped>("/drone/mavros/setpoint_velocity/cmd_vel", 10);
+  // ros::Publisher local_vel_pub = nh.advertise<geometry_msgs::TwistStamped>("/drone/mavros/setpoint_velocity/cmd_vel", 10);
   
   //
   // ros::Publisher input_pub = nh.advertise<mavros_msgs::AttitudeTarget>("mavros/setpoint_raw/attitude", 10);
@@ -631,7 +651,7 @@ int main(int argc, char **argv)
   nav_msgs::Path path_msg;
   path_msg.header.frame_id = "map";
   geometry_msgs::PoseStamped pose;
-  // std::thread genthread(generatorThread, std::ref(marker_pub_), std::ref(marker_pub));
+  std::thread genthread(generatorThread, std::ref(marker_pub_), std::ref(marker_pub));
 
   quadrotor_common::TrajectoryPoint end_point = getFakePoint(3.0);
   quadrotor_common::TrajectoryPoint reference_point;
@@ -766,26 +786,17 @@ int main(int argc, char **argv)
     criteria = std::sqrt(std::pow(end_point.position.x() - state_estimate.position.x(), 2) + std::pow(end_point.position.y() - state_estimate.position.y(), 2));
   }
 
-  PID pid_xy(2.0, 1.0, 0.2, vel_gain);
-  PID pid_z(1.2, 0.0, 0.3, vz_max);
+
+  PID pid_xy(1.5, 0.5, 0.1, vel_gain);
+  PID pid_z(1.2, 0.0, 0.1, vz_max);
 
   ROS_INFO("parallel flight");
-  double s_T = ros::Time::now().toSec();
-  double c_T = ros::Time::now().toSec();
   geometry_msgs::TwistStamped vel_com;
   vel_com.twist.linear.x = vel_gain;
   vel_com.twist.linear.y = 0.0;
   vel_com.twist.linear.z = 0.0;
   local_vel_pub.publish(vel_com);
   
-  // quadrotor_common::TrajectoryPoint e_p = getFakePoint(3.0);
-  // double d = e_p.position.x() - state_estimate.position.x();
-  // double v_c = state_estimate.velocity.x();
-  // v_c = 4.0;
-  // double t_m = 2*d / (v_c - 3);
-  // std::cout << "d: " << d << std::endl;
-  // std::cout << "v_c: " << v_c << std::endl;
-  // std::cout << "t_m: " << t_m << std::endl;
   double PID_rate = 20.0;
   ros::Rate PID_loop_rate(PID_rate);
   double PID_dt = 1 / PID_rate;
@@ -802,30 +813,127 @@ int main(int argc, char **argv)
   double new_criteria = (end_point.position - state_estimate.position).norm();
   double align_thres = 0.1;
   bool loop_active = true;
+  bool is_attached = false;  // is satisfied horizontal position threshold
+  bool is_satisfied = false;  // duration after satisfied the condition
+
+  bool is_attached2 = false;  // is satisfied aruco horizontal position threshold
+  bool is_satisfied2 = false;  // aruco duration after satisfied the condition
+  bool first_after_search = true;
+  bool is_searching = false;
+  bool vertical_flag = false;
+
+  double detected_height;
   ros::param::set("/loop_active", true);
   parallel = true;
-  while (new_criteria > align_thres) {
-  // while (loop_active) {
+  double s_T = ros::Time::now().toSec();
+  double c_T = ros::Time::now().toSec();
+  // while (new_criteria > align_thres) {
+  while (loop_active) {
     end_point = getFakePoint(3.0);
-    target_pos = end_point.position;
     current_pos = state_estimate.position;
-    new_criteria = (target_pos - current_pos).norm();
+
     Eigen::Vector2d station_vec = getENUUnitVector();
-    station_vec *= 1;
+    station_vec *= (vel_gain - vel_offset);
+
+    if (is_satisfied) {
+      if (is_satisfied2) {
+        if (is_detected) {
+          target_pos.x() = aruco_pose.pose.position.x;
+          target_pos.y() = aruco_pose.pose.position.y;
+          // target_pos.z() = aruco_pose.pose.position.z;
+        } 
+        // else {
+        //   std::cout << "ok" << std::endl;
+        // }
+      } else {
+        if (is_detected) {
+          target_pos.x() = aruco_pose.pose.position.x;
+          target_pos.y() = aruco_pose.pose.position.y;
+          if (is_searching) {
+            if (first_after_search) {
+              ROS_INFO("Marker is detected after going up");
+              detected_height = std::round(current_pos.z()) + 1.0;
+              first_after_search = false;
+            } 
+            target_pos.z() = detected_height;
+            
+            double vertical_criteria = std::fabs(target_pos.z()-current_pos.z());
+            double horizontal_criteria = std::sqrt(std::pow(target_pos.x()-current_pos.x(), 2) + std::pow(target_pos.y()-current_pos.y(), 2));
+            if (vertical_criteria <= align_thres) {
+              if (!vertical_flag) {
+                ROS_INFO("Going up is done, horizontal aligning to the marker");                
+                vertical_flag = true;
+              } else {
+                if (horizontal_criteria <= align_thres) {
+                  ROS_INFO("Aligning to the marker after search is done");  
+                  is_searching = false;
+                }
+              }
+            } else {
+              if (!vertical_flag) {
+                target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
+                target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());
+              }              
+            }            
+          } else {            
+            target_pos.z() = aruco_pose.pose.position.z + HEIGHT_OFFSET;
+          }          
+        } else {
+          if (!is_searching) {
+            ROS_INFO("Marker is not detected, going up");
+            is_searching = true;
+          }
+          target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
+          target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());
+          target_pos.z() = 4.0;          
+        }
+      }
+    } else {
+      target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
+      target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());
+      target_pos.z() = end_point.position.z(); 
+    }
+
+    new_criteria = (target_pos - current_pos).norm();    
+
+    if (new_criteria <= align_thres && !is_attached) {
+      s_T = ros::Time::now().toSec();
+      is_attached = true;
+      ROS_INFO("Attached to the GPS target point");
+    }
+
+    if (is_satisfied && !is_satisfied2) {
+      if (is_detected) {
+        if (new_criteria <= align_thres && !is_attached2) {          
+          is_attached2 = true;
+          ROS_INFO("Attached to the marker target point");
+          s_T = ros::Time::now().toSec();
+        } else if (is_attached2) {
+          c_T = ros::Time::now().toSec();
+          if (c_T - s_T >= 2) {
+            is_satisfied2 = true;
+            ROS_INFO("Marker target point condition is satisfied");
+          }
+        }
+      } else {
+        c_T = 0;
+      }
+    }
 
     target_z.z() = target_pos.z();
     current_z.z() = current_pos.z();
-    // target_pos.x() += station_vec.x();
-    // target_pos.y() += station_vec.y();
 
-    // vel_vector.x() = pid_x.calculate(target_pos.x(), current_pos.x(), PID_dt);
-    // vel_vector.y() = pid_y.calculate(target_pos.y(), current_pos.y(), PID_dt);
-    // vel_vector.z() = pid_z.calculate(2.0, current_pos.z(), PID_dt);
-    pid_xy.setVMax(vel_gain);
+    pid_xy.setVMax(vel_gain); // adaptive to the station velocity
     vel_vector = pid_xy.calculate(target_pos, current_pos, PID_dt);
     vel_z = pid_z.calculate(target_z, current_z, PID_dt);
 
-    double target_hdg = hdg;
+    double target_hdg;
+    if (is_detected && is_satisfied) {
+      target_hdg = aruco_pose.pose.orientation.z;
+    } else {
+      target_hdg = hdg;
+    }
+    
     double current_hdg = hd;
     double delta_yaw = target_hdg - current_hdg;
     if (abs(delta_yaw) > 180) {
@@ -843,48 +951,44 @@ int main(int argc, char **argv)
     Eigen::Vector3d yaw_tmp = pid_yaw.calculate(target, current, PID_dt);
     double yaw_command = yaw_tmp.x();
     
-    std::cout << "target x: " << target_pos.x() << ", current x: " << current_pos.x() << std::endl;
-    std::cout << "target y: " << target_pos.y() << ", current y: " << current_pos.y() << std::endl;
-    std::cout << "target z: " << 0.0 << ", current z: " << current_pos.z() << std::endl;
-    std::cout << "target yaw: " << target_hdg << ", current yaw: " << current_yaw << std::endl;
+    // std::cout << "target x: " << target_pos.x() << ", current x: " << current_pos.x() << std::endl;
+    // std::cout << "target y: " << target_pos.y() << ", current y: " << current_pos.y() << std::endl;
+    // std::cout << "target z: " << 0.0 << ", current z: " << current_pos.z() << std::endl;
+    // std::cout << "target yaw: " << target_hdg << ", current yaw: " << current_yaw << std::endl;
 
-    std::cout << "v_x: " << vel_vector.x() << ", v_y: " << vel_vector.y() << ", v_z: " << vel_z.z() << ", v_yaw: " << yaw_command << std::endl;
+    // std::cout << "v_x: " << vel_vector.x() << ", v_y: " << vel_vector.y() << ", v_z: " << vel_z.z() << ", v_yaw: " << yaw_command << std::endl;
     vel_com.twist.linear.x = vel_vector.x();
     vel_com.twist.linear.y = vel_vector.y();
-    vel_com.twist.linear.z = vel_z.z();
+    if (is_attached && !is_satisfied) {
+      c_T = ros::Time::now().toSec();
+      if (c_T - s_T >= 2) {
+        is_satisfied = true;        
+        ROS_INFO("GPS target point condition is satisfied");
+      }
+    }
+    
+    if (is_satisfied2) {
+      vel_com.twist.linear.z = -0.7;
+      if (!is_detected) {
+        vel_com.twist.linear.x = station_vec.x();
+        vel_com.twist.linear.y = station_vec.y();
+      }
+    } else {
+      vel_com.twist.linear.z = vel_z.z();
+    }
     vel_com.twist.angular.z = yaw_command;
-    std::cout << "speed: " << std::sqrt(std::pow(vel_vector.x(), 2) + std::pow(vel_vector.y(), 2) + std::pow(vel_vector.z(), 2)) << std::endl;
-    std::cout << "distance: " << new_criteria << std::endl;
-    std::cout << "---" << std::endl;
-
+    
+    // std::cout << "speed: " << std::sqrt(std::pow(vel_vector.x(), 2) + std::pow(vel_vector.y(), 2) + std::pow(vel_vector.z(), 2)) << std::endl;
+    // std::cout << "distance: " << new_criteria << std::endl;
+    
+    // std::cout << "aruco_detected: " << is_detected << std::endl;
+    // std::cout << "---" << std::endl;
+    
     local_vel_pub.publish(vel_com);
     ros::param::get("/loop_active", loop_active);
     ros::spinOnce();
     PID_loop_rate.sleep();
   }
-  
-  // ROS_INFO("Decending");
-  // double s_T = ros::Time::now().toSec();
-  // double c_T = ros::Time::now().toSec();
-  // while (c_T - s_T < 4.0) {
-  //   geometry_msgs::Vector3 vel = station_vel.twist.linear;
-  //   double speed = std::sqrt(std::pow(vel.x, 2) + std::pow(vel.y, 2));
-  //   Eigen::Vector2d station_vec = getENUUnitVector();
 
-  //   vel_com.twist.linear.x = speed*station_vec.x();
-  //   vel_com.twist.linear.y = speed*station_vec.y();
-  //   vel_com.twist.linear.z = -0.5;
-  //   local_vel_pub.publish(vel_com);
-  //   ros::spinOnce();
-  //   loop_rate.sleep();
-  //   c_T = ros::Time::now().toSec();
-  // }
-  
-  // send_force_disarm(nh);
-  // e_p = getFakePoint(3.0);
-  // e_p.position.z() = 0.0;
-  // visualization_msgs::Marker end = visualizer11(e_p);
-  // marker_pub_.publish(end);
-  
   return 0;
 }

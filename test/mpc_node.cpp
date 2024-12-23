@@ -49,15 +49,21 @@
 #include <mutex>
 #include <vector>
 #include <cmath>
-#include <gazebo_msgs/ModelStates.h> // SITL
-#include <string> // SITL
+// #include <gazebo_msgs/ModelStates.h> // SITL
+// #include <string> // SITL
 #include <cstdlib>
 
 // #define VEL_GAIN 5.0
-#define HEIGHT_OFFSET 2.0
-#define INIT_HEIGHT 5.0
+#define HEIGHT_OFFSET 1.5
+#define INIT_HEIGHT 6.0
 #define SITL 1
-#define MARKER_OFFSET 1.0
+#define MARKER_OFFSET -0.7
+#define STATION_OFFSET 1.5
+#define SLIGHT_UP 0.2
+#define UP_LIMIT 2.5
+#define MARKER_TIME 1.5
+#define UWB_TIME 1.5
+#define MARKER_THRES 0.2
 
 std::vector<Eigen::Vector3d> waypoint;
 // double start_time = 0;
@@ -74,6 +80,7 @@ geometry_msgs::TwistStamped station_vel;
 geometry_msgs::PoseStamped aruco_pose;
 double hdg; // station heading
 double hd;  // drone heading
+double rel_alt;
 
 class PID {
 public:
@@ -130,18 +137,22 @@ void enu_pos_cb(const geometry_msgs::Point::ConstPtr& msg){
     station_pos = *msg;
 }
 
-void modelStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg) {   // SITL
-    std::string target_model = "husky";
-
-    auto it = std::find(msg->name.begin(), msg->name.end(), target_model);
-    if (it != msg->name.end()) {        
-        int index = std::distance(msg->name.begin(), it);
-        
-        station_pos = msg->pose[index].position;
-    } else {
-        ROS_WARN("Iris model not found in ModelStates topic.");
-    }
+void uwb_pos_cb(const geometry_msgs::Point::ConstPtr& msg){
+    station_pos = *msg;
 }
+
+// void modelStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg) {   // SITL
+//     std::string target_model = "husky";
+
+//     auto it = std::find(msg->name.begin(), msg->name.end(), target_model);
+//     if (it != msg->name.end()) {        
+//         int index = std::distance(msg->name.begin(), it);
+        
+//         station_pos = msg->pose[index].position;
+//     } else {
+//         ROS_WARN("Iris model not found in ModelStates topic.");
+//     }
+// }
 
 void enu_vel_cb(const geometry_msgs::TwistStamped::ConstPtr& msg){
     station_vel = *msg;
@@ -156,6 +167,10 @@ void hd_cb(const std_msgs::Float64::ConstPtr& msg) {
     hd = msg->data;
 }
 
+void alt_cb(const std_msgs::Float64::ConstPtr& msg) {
+    rel_alt = msg->data;
+}
+
 visualization_msgs::MarkerArray visualizer2(std::vector<Eigen::Vector3d>& msg);
 
 void stateCallback(const nav_msgs::Odometry::ConstPtr& msg, quadrotor_common::QuadStateEstimate& state_estimate) {
@@ -164,7 +179,8 @@ void stateCallback(const nav_msgs::Odometry::ConstPtr& msg, quadrotor_common::Qu
 
   state_estimate.position = Eigen::Vector3d(msg->pose.pose.position.x,
                                             msg->pose.pose.position.y,
-                                            msg->pose.pose.position.z);
+                                            rel_alt);
+                                            // msg->pose.pose.position.z);
                                           
   state_estimate.orientation = Eigen::Quaterniond(msg->pose.pose.orientation.w,
                                                   msg->pose.pose.orientation.x,
@@ -180,29 +196,29 @@ void stateCallback(const nav_msgs::Odometry::ConstPtr& msg, quadrotor_common::Qu
                                              msg->twist.twist.angular.z);
 }
 
-void send_force_disarm(ros::NodeHandle &nh) {
+// void send_force_disarm(ros::NodeHandle &nh) {
 
-  ros::ServiceClient command_client = nh.serviceClient<mavros_msgs::CommandLong>("mavros/cmd/command");
+//   ros::ServiceClient command_client = nh.serviceClient<mavros_msgs::CommandLong>("mavros/cmd/command");
 
-  // Create the service message
-  mavros_msgs::CommandLong srv;
+//   // Create the service message
+//   mavros_msgs::CommandLong srv;
   
-  // Set the disarm command (MAV_CMD_COMPONENT_ARM_DISARM)
-  srv.request.command = MAV_CMD_COMPONENT_ARM_DISARM;
-  srv.request.param1 = 0;       // Param1: 0 = disarm
-  srv.request.param2 = 21196;   // Param2: Magic number to force disarm (force flag)
+//   // Set the disarm command (MAV_CMD_COMPONENT_ARM_DISARM)
+//   srv.request.command = MAV_CMD_COMPONENT_ARM_DISARM;
+//   srv.request.param1 = 0;       // Param1: 0 = disarm
+//   srv.request.param2 = 21196;   // Param2: Magic number to force disarm (force flag)
   
-  // Call the service
-  if (command_client.call(srv)) {
-      if (srv.response.success) {
-          ROS_INFO("Force disarm command succeeded.");
-      } else {
-          ROS_WARN("Force disarm command failed.");
-      }
-  } else {
-      ROS_ERROR("Failed to call force disarm service.");
-  }
-}
+//   // Call the service
+//   if (command_client.call(srv)) {
+//       if (srv.response.success) {
+//           ROS_INFO("Force disarm command succeeded.");
+//       } else {
+//           ROS_WARN("Force disarm command failed.");
+//       }
+//   } else {
+//       ROS_ERROR("Failed to call force disarm service.");
+//   }
+// }
 
 constexpr double degreesToRadians(double degrees) {
     return degrees * M_PI / 180.0;
@@ -247,7 +263,7 @@ Eigen::Vector2d findFootOfPerpendicular(const Eigen::Vector3d& last_target) {
     return foot;
 }
 
-quadrotor_common::TrajectoryPoint getFakePoint(double target_vel) { // read target position
+quadrotor_common::TrajectoryPoint getTargetPoint() { // read target position
   quadrotor_common::TrajectoryPoint target_point;
   
   Eigen::Vector2d vec = getENUUnitVector();
@@ -256,7 +272,7 @@ quadrotor_common::TrajectoryPoint getFakePoint(double target_vel) { // read targ
 
   target_point.position.x() = station_pos.x - (MARKER_OFFSET*vector.x());
   target_point.position.y() = station_pos.y - (MARKER_OFFSET*vector.y());
-  target_point.position.z() = HEIGHT_OFFSET;
+  target_point.position.z() = STATION_OFFSET + HEIGHT_OFFSET;
 
   target_point.velocity.x() = vel.x();
   target_point.velocity.y() = vel.y();
@@ -369,30 +385,30 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory2(quadrotor_common::Qu
   return dynamic_traj;
 }
 
-mavros_msgs::AttitudeTarget command2Bodyrate(const quadrotor_common::ControlCommand& command) {
-  quadrotor_msgs::ControlCommand ros_command = command.toRosMessage();
+// mavros_msgs::AttitudeTarget command2Bodyrate(const quadrotor_common::ControlCommand& command) {
+//   quadrotor_msgs::ControlCommand ros_command = command.toRosMessage();
   
-  mavros_msgs::AttitudeTarget attitude;
+//   mavros_msgs::AttitudeTarget attitude;
   
-  attitude.header.stamp = ros_command.header.stamp;
-  attitude.header.frame_id = "map";
+//   attitude.header.stamp = ros_command.header.stamp;
+//   attitude.header.frame_id = "map";
 
-  attitude.type_mask = 128;
+//   attitude.type_mask = 128;
 
-  // attitude.orientation.x = ros_command.orientation.x;
-  // attitude.orientation.y = ros_command.orientation.y;
-  // attitude.orientation.z = ros_command.orientation.z;
-  // attitude.orientation.w = ros_command.orientation.w;
-  attitude.orientation.w = 1.0;
-  attitude.body_rate.x = ros_command.bodyrates.x;
-  attitude.body_rate.y = ros_command.bodyrates.y;
-  attitude.body_rate.z = ros_command.bodyrates.z;
+//   // attitude.orientation.x = ros_command.orientation.x;
+//   // attitude.orientation.y = ros_command.orientation.y;
+//   // attitude.orientation.z = ros_command.orientation.z;
+//   // attitude.orientation.w = ros_command.orientation.w;
+//   attitude.orientation.w = 1.0;
+//   attitude.body_rate.x = ros_command.bodyrates.x;
+//   attitude.body_rate.y = ros_command.bodyrates.y;
+//   attitude.body_rate.z = ros_command.bodyrates.z;
 
-  const auto& thrust = ros_command.collective_thrust;
-  attitude.thrust = 0.1 + (thrust - 2.0) * (0.7 - 0.1) / (20.0 - 2.0);
-  // attitude.thrust = ros_command.collective_thrust;
-  return attitude;
-}
+//   const auto& thrust = ros_command.collective_thrust;
+//   attitude.thrust = 0.1 + (thrust - 2.0) * (0.7 - 0.1) / (20.0 - 2.0);
+//   // attitude.thrust = ros_command.collective_thrust;
+//   return attitude;
+// }
 
 visualization_msgs::MarkerArray visualizer(nav_msgs::Path& msg, int add) { // trajectory path components
     // Clear the previous marker array
@@ -531,7 +547,7 @@ void generatorThread(ros::Publisher& station_pub, ros::Publisher& target_pub) {
     ros::Rate rate(10);
     
     while (ros::ok()) {
-      quadrotor_common::TrajectoryPoint end_point = getFakePoint(3.0);
+      quadrotor_common::TrajectoryPoint end_point = getTargetPoint();
 
       if (parallel) {
         visualization_msgs::Marker target_mark = visualizer1(end_point);
@@ -565,35 +581,38 @@ int main(int argc, char **argv)
   // Subscriber
 
   // SITL
-  ros::Subscriber ros_state_sub = nh.subscribe<mavros_msgs::State>("mavros/state", 10, state_cb); // SITL
-  ros::Subscriber state_sub = nh.subscribe<nav_msgs::Odometry>("mavros/local_position/odom", 10, [&state_estimate](const nav_msgs::Odometry::ConstPtr& msg)
-                                                                {stateCallback(msg, state_estimate);}
-                                                              ); // SITL
-  ros::Subscriber sub = nh.subscribe("/gazebo/model_states", 10, modelStatesCallback); // SITL
-  ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("gps_vel", 10, enu_vel_cb);
-  ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("compass_hdg", 10, hdg_cb);
-  ros::Subscriber hdg_sub = nh.subscribe<std_msgs::Float64>("/mavros/global_position/compass_hdg", 10, hd_cb);
-  ros::Subscriber aruco_sub = nh.subscribe<geometry_msgs::PoseStamped>("/aruco_marker/pose", 10, aruco_cb);
+  // ros::Subscriber ros_state_sub = nh.subscribe<mavros_msgs::State>("mavros/state", 10, state_cb); // SITL
+  // ros::Subscriber state_sub = nh.subscribe<nav_msgs::Odometry>("mavros/local_position/odom", 10, [&state_estimate](const nav_msgs::Odometry::ConstPtr& msg)
+  //                                                               {stateCallback(msg, state_estimate);}
+  //                                                             ); // SITL
+  // ros::Subscriber sub = nh.subscribe("/gazebo/model_states", 10, modelStatesCallback); // SITL
+  // ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("gps_vel", 10, enu_vel_cb);
+  // ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("compass_hdg", 10, hdg_cb);
+  // ros::Subscriber hdg_sub = nh.subscribe<std_msgs::Float64>("/mavros/global_position/compass_hdg", 10, hd_cb);
+  // ros::Subscriber alt_sub = nh.subscribe<std_msgs::Float64>("/mavros/global_position/rel_alt", 10, alt_cb);
+  // ros::Subscriber aruco_sub = nh.subscribe<geometry_msgs::PoseStamped>("/aruco_marker/pose", 10, aruco_cb);
 
   // offboard
-  // ros::Subscriber ros_state_sub = nh.subscribe<mavros_msgs::State>("/drone/mavros/state", 10, state_cb);
-  // ros::Subscriber state_sub = nh.subscribe<nav_msgs::Odometry>("/drone/mavros/local_position/odom", 10, [&state_estimate](const nav_msgs::Odometry::ConstPtr& msg)
-  //                                                               {stateCallback(msg, state_estimate);}
-  //                                                             );
-  // ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("/station/mavros/global_position/raw/gps_vel", 10, enu_vel_cb);
-  // ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("/station/mavros/global_position/compass_hdg", 10, hdg_cb);
-  // ros::Subscriber hdg_sub = nh.subscribe<std_msgs::Float64>("/drone/mavros/global_position/compass_hdg", 10, hd_cb);
+  ros::Subscriber ros_state_sub = nh.subscribe<mavros_msgs::State>("/drone/mavros/state", 10, state_cb);
+  ros::Subscriber state_sub = nh.subscribe<nav_msgs::Odometry>("/drone/mavros/local_position/odom", 10, [&state_estimate](const nav_msgs::Odometry::ConstPtr& msg)
+                                                                {stateCallback(msg, state_estimate);}
+                                                              );
+  ros::Subscriber ros_enu_vel_sub = nh.subscribe<geometry_msgs::TwistStamped>("/station/mavros/global_position/raw/gps_vel", 10, enu_vel_cb);
+  ros::Subscriber ros_hdg_sub = nh.subscribe<std_msgs::Float64>("/station/mavros/global_position/compass_hdg", 10, hdg_cb);
+  ros::Subscriber hdg_sub = nh.subscribe<std_msgs::Float64>("/drone/mavros/global_position/compass_hdg", 10, hd_cb);
+  ros::Subscriber alt_sub = nh.subscribe<std_msgs::Float64>("/drone/mavros/global_position/rel_alt", 10, alt_cb);
   
   // ros::Subscriber ros_enu_pos_sub = nh.subscribe<geometry_msgs::Point>("station_enu", 10, enu_pos_cb);
-  // ros::Subscriber aruco_sub = nh.subscribe<geometry_msgs::PoseStamped>("/aruco_marker/pose", 10, aruco_cb);
-  
+  ros::Subscriber aruco_sub = nh.subscribe<geometry_msgs::PoseStamped>("/aruco_marker/pose", 10, aruco_cb);
+  ros::Subscriber ros_uwb_pos_sub = nh.subscribe<geometry_msgs::Point>("estimate_positions", 10, uwb_pos_cb);
+
   // Publisher
   
   // SITL
-  ros::Publisher local_vel_pub = nh.advertise<geometry_msgs::TwistStamped>("/mavros/setpoint_velocity/cmd_vel", 10); // SITL
+  // ros::Publisher local_vel_pub = nh.advertise<geometry_msgs::TwistStamped>("/mavros/setpoint_velocity/cmd_vel", 10); // SITL
   
   // offboard
-  // ros::Publisher local_vel_pub = nh.advertise<geometry_msgs::TwistStamped>("/drone/mavros/setpoint_velocity/cmd_vel", 10);
+  ros::Publisher local_vel_pub = nh.advertise<geometry_msgs::TwistStamped>("/drone/mavros/setpoint_velocity/cmd_vel", 10);
   
   //
   // ros::Publisher input_pub = nh.advertise<mavros_msgs::AttitudeTarget>("mavros/setpoint_raw/attitude", 10);
@@ -605,6 +624,8 @@ int main(int argc, char **argv)
   ros::Publisher marker_pub_ = nh.advertise<visualization_msgs::Marker>("/visualization_marker1", 10);
   ros::Publisher reference_pub = nh.advertise<nav_msgs::Path>("reference_trajectory", 1);
   
+  ros::param::set("/landing", false);
+
   double rate = 20.0;
   ros::Rate loop_rate(rate);
   
@@ -622,6 +643,8 @@ int main(int argc, char **argv)
   up_vel.twist.linear.x = 0.0;
   up_vel.twist.linear.y = 0.0;
   up_vel.twist.linear.z = 1.0;
+
+  ROS_INFO("changed!?")
 
   // wait until mode change to offboard
   ros::Time up_start_time = ros::Time::now();
@@ -653,7 +676,7 @@ int main(int argc, char **argv)
   geometry_msgs::PoseStamped pose;
   std::thread genthread(generatorThread, std::ref(marker_pub_), std::ref(marker_pub));
 
-  quadrotor_common::TrajectoryPoint end_point = getFakePoint(3.0);
+  quadrotor_common::TrajectoryPoint end_point = getTargetPoint();
   quadrotor_common::TrajectoryPoint reference_point;
   bool is_first = true;
 
@@ -661,11 +684,12 @@ int main(int argc, char **argv)
   // double vel_gain = 5.0;
   double velocity_gain = vel_gain;
   double look_ahead = std::max(1.0, 0.6*velocity_gain);
-  double transition_distance = vel_offset * 3.0;
+  double transition_distance = vel_offset * 4.0;
+  geometry_msgs::TwistStamped vel_com;
   while (ros::ok() && criteria > transition_distance) {
     ros::Time time = ros::Time::now();
     path_msg.header.stamp = time;
-    end_point = getFakePoint(3.0);
+    end_point = getTargetPoint();
 
     if (is_first) {
       reference_trajectory = getDynamicReferenceTrajectory(state_estimate, end_point);
@@ -706,31 +730,31 @@ int main(int argc, char **argv)
     double s_T = ros::Time::now().toSec();
     double c_T = ros::Time::now().toSec();
     while (ros::ok() && c_T - s_T < 1.0) {
-      quadrotor_common::TrajectoryPoint e_p = getFakePoint(3.0);
+      quadrotor_common::TrajectoryPoint e_p = getTargetPoint();
       e_p.position.z() = 0.0;
       visualization_msgs::Marker end = visualizer11(e_p);
       marker_pub_.publish(end);
 
       reference_point = reference_trajectory.points.front();
-      Eigen::Quaterniond q = reference_point.orientation;
-      q.normalize();  // Make sure the quaternion is normalized
+      // Eigen::Quaterniond q = reference_point.orientation;
+      // q.normalize();  // Make sure the quaternion is normalized
 
-      // Convert to rotation matrix
-      Eigen::Matrix3d rotationMatrix = q.toRotationMatrix();
+      // // Convert to rotation matrix
+      // Eigen::Matrix3d rotationMatrix = q.toRotationMatrix();
 
-      // Extract Euler angles from rotation matrix (roll, pitch, yaw)
-      double roll = std::atan2(rotationMatrix(2, 1), rotationMatrix(2, 2));
-      double pitch = std::asin(-rotationMatrix(2, 0));
-      double yaw = std::atan2(rotationMatrix(1, 0), rotationMatrix(0, 0));
+      // // Extract Euler angles from rotation matrix (roll, pitch, yaw)
+      // double roll = std::atan2(rotationMatrix(2, 1), rotationMatrix(2, 2));
+      // double pitch = std::asin(-rotationMatrix(2, 0));
+      // double yaw = std::atan2(rotationMatrix(1, 0), rotationMatrix(0, 0));
 
-      std::cout << "---" << '\n';
-      Eigen::Vector3d pos = reference_point.position;
-      Eigen::Vector3d vel = reference_point.velocity;
-      double head = reference_point.heading;
-      std::cout << "position: " << pos.x() << ", " << pos.y() << ", " << pos.z() << '\n';
-      std::cout << "euler   : " << vel.x() << ", " << vel.y() << ", " << vel.z() << '\n';
-      std::cout << "velocity: " << roll << ", " << pitch << ", " << yaw << '\n';
-      std::cout << "heading : " << head << '\n';
+      // std::cout << "---" << '\n';
+      // Eigen::Vector3d pos = reference_point.position;
+      // Eigen::Vector3d vel = reference_point.velocity;
+      // double head = reference_point.heading;
+      // std::cout << "position: " << pos.x() << ", " << pos.y() << ", " << pos.z() << '\n';
+      // std::cout << "euler   : " << vel.x() << ", " << vel.y() << ", " << vel.z() << '\n';
+      // std::cout << "velocity: " << roll << ", " << pitch << ", " << yaw << '\n';
+      // std::cout << "heading : " << head << '\n';
       visualization_msgs::Marker target_mark = visualizer1(reference_point);
       marker_pub.publish(target_mark);
 
@@ -752,20 +776,20 @@ int main(int argc, char **argv)
       double current_yaw = target_hdg + delta_yaw;
       current_yaw *= (M_PI/180);
       target_hdg *= (M_PI/180);
-      std::cout << "curr_yaw: " << current_yaw << '\n';
-      std::cout << "target_yaw: " << target_hdg << '\n';
+      // std::cout << "curr_yaw: " << current_yaw << '\n';
+      // std::cout << "target_yaw: " << target_hdg << '\n';
 
       Eigen::Vector3d target(target_hdg, 0.0, 0.0);
       Eigen::Vector3d current(current_yaw, 0.0, 0.0);
       Eigen::Vector3d yaw_tmp = pid_yaw.calculate(target, current, 0.05);
       double yaw_command = yaw_tmp.x();
 
-      geometry_msgs::TwistStamped vel_com;
+      // geometry_msgs::TwistStamped vel_com;
       vel_com.twist.linear.x = vel_vector.x();
       vel_com.twist.linear.y = vel_vector.y();
       vel_com.twist.linear.z = vel_vector.z();
       vel_com.twist.angular.z = yaw_command;
-      std::cout << "yaw_command: " << yaw_command << '\n';
+      // std::cout << "yaw_command: " << yaw_command << '\n';
       double dist_reference = vector_current_reference.norm();
       // std::cout << "state: " << "x: " <<  state_estimate.position.x() << ", y: " <<  state_estimate.position.y() << ", z: " <<  state_estimate.position.z() << '\n';
       // std::cout << "refer: " << "x: " <<  reference_point.position.x() << ", y: " <<  reference_point.position.y() << ", z: " <<  reference_point.position.z() << '\n';
@@ -788,14 +812,14 @@ int main(int argc, char **argv)
 
 
   PID pid_xy(1.5, 0.5, 0.1, vel_gain);
-  PID pid_z(1.2, 0.0, 0.1, vz_max);
+  PID pid_z(0.8, 0.0, 0.1, vz_max);
 
-  ROS_INFO("parallel flight");
-  geometry_msgs::TwistStamped vel_com;
-  vel_com.twist.linear.x = vel_gain;
-  vel_com.twist.linear.y = 0.0;
-  vel_com.twist.linear.z = 0.0;
-  local_vel_pub.publish(vel_com);
+  ROS_INFO("parallel flight!");
+  // geometry_msgs::TwistStamped vel_com;
+  // vel_com.twist.linear.x = vel_gain;
+  // vel_com.twist.linear.y = 0.0;
+  // vel_com.twist.linear.z = 0.0;
+  // local_vel_pub.publish(vel_com);
   
   double PID_rate = 20.0;
   ros::Rate PID_loop_rate(PID_rate);
@@ -803,15 +827,19 @@ int main(int argc, char **argv)
   
   // geometry_msgs::TwistStamped vel_com;
   Eigen::Vector3d target_pos;
+  Eigen::Vector3d target_tmp_pos;
+  Eigen::Vector3d error_pos(0.0, 0.0, 0.0);
   Eigen::Vector3d current_pos;
   Eigen::Vector3d target_z;
   Eigen::Vector3d current_z;
   Eigen::Vector3d vel_vector;
   Eigen::Vector3d vel_z;
+  // int i;
+  // double j = 0.2;
   // quadrotor_common::TrajectoryPoint end_point = getFakePoint(3.0);
 
   double new_criteria = (end_point.position - state_estimate.position).norm();
-  double align_thres = 0.1;
+  double align_thres = 0.2;
   bool loop_active = true;
   bool is_attached = false;  // is satisfied horizontal position threshold
   bool is_satisfied = false;  // duration after satisfied the condition
@@ -821,7 +849,7 @@ int main(int argc, char **argv)
   bool first_after_search = true;
   bool is_searching = false;
   bool vertical_flag = false;
-
+  bool detected_before_target = false;
   double detected_height;
   ros::param::set("/loop_active", true);
   parallel = true;
@@ -829,69 +857,104 @@ int main(int argc, char **argv)
   double c_T = ros::Time::now().toSec();
   // while (new_criteria > align_thres) {
   while (loop_active) {
-    end_point = getFakePoint(3.0);
+    end_point = getTargetPoint();
     current_pos = state_estimate.position;
 
     Eigen::Vector2d station_vec = getENUUnitVector();
     station_vec *= (vel_gain - vel_offset);
 
-    if (is_satisfied) {
-      if (is_satisfied2) {
+    if (is_satisfied) { // target arrival condition is satisfied
+      if (is_satisfied2) { // marker arrival condition is satisfied
         if (is_detected) {
+          target_tmp_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
+          target_tmp_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());
+
           target_pos.x() = aruco_pose.pose.position.x;
           target_pos.y() = aruco_pose.pose.position.y;
+
+          error_pos = target_pos - target_tmp_pos;
           // target_pos.z() = aruco_pose.pose.position.z;
         } 
         // else {
         //   std::cout << "ok" << std::endl;
         // }
-      } else {
+      } else { // marker arrival condition is not satisfied
         if (is_detected) {
+          target_tmp_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
+          target_tmp_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());
+
           target_pos.x() = aruco_pose.pose.position.x;
           target_pos.y() = aruco_pose.pose.position.y;
+
+          error_pos = target_pos - target_tmp_pos;
           if (is_searching) {
             if (first_after_search) {
               ROS_INFO("Marker is detected after going up");
-              detected_height = std::round(current_pos.z()) + 1.0;
+              detected_height = std::round(current_pos.z()) + SLIGHT_UP;
               first_after_search = false;
             } 
             target_pos.z() = detected_height;
             
             double vertical_criteria = std::fabs(target_pos.z()-current_pos.z());
             double horizontal_criteria = std::sqrt(std::pow(target_pos.x()-current_pos.x(), 2) + std::pow(target_pos.y()-current_pos.y(), 2));
-            if (vertical_criteria <= align_thres) {
+            if (vertical_criteria <= VERTICAL_THRES) {
               if (!vertical_flag) {
                 ROS_INFO("Going up is done, horizontal aligning to the marker");                
                 vertical_flag = true;
               } else {
-                if (horizontal_criteria <= align_thres) {
+                if (horizontal_criteria <= MARKER_THRES) {
                   ROS_INFO("Aligning to the marker after search is done");  
                   is_searching = false;
                 }
               }
             } else {
               if (!vertical_flag) {
-                target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
-                target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());
+                target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x()) + error_pos.x();
+                target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y()) + error_pos.y();
               }              
             }            
           } else {            
-            target_pos.z() = aruco_pose.pose.position.z + HEIGHT_OFFSET;
+            target_pos.z() = aruco_pose.pose.position.z + STATION_OFFSET;
           }          
-        } else {
-          if (!is_searching) {
-            ROS_INFO("Marker is not detected, going up");
-            is_searching = true;
+        } else { // Not marker arrival condition, Not detected
+          if (detected_before_target) {
+            target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x()) + error_pos.x();
+            target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y()) + error_pos.y();
+          } else {
+            if (!is_searching) {
+              ROS_INFO("Marker is not detected, going up");
+              is_searching = true;
+            }
+            target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x()) + error_pos.x();
+            target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y()) + error_pos.y();
+            double curr_z = current_pos.z();
+            if (curr_z < STATION_OFFSET + UP_LIMIT) {
+              target_pos.z() = current_pos.z() + 0.1;
+            }
           }
-          target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
-          target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());
-          target_pos.z() = 4.0;          
         }
       }
-    } else {
-      target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
-      target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());
-      target_pos.z() = end_point.position.z(); 
+    } else { // target arrival condition is not satisfied
+      if (is_detected) {
+        ROS_INFO("Marker is detected before attaching to the UWB target point");
+        target_tmp_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
+        target_tmp_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());
+        
+        target_pos.x() = aruco_pose.pose.position.x;
+        target_pos.y() = aruco_pose.pose.position.y;
+
+        error_pos = target_pos - target_tmp_pos;
+        // std::cout << "error_x: " << error_pos.x() << std::endl;
+        // std::cout << "error_y: " << error_pos.y() << std::endl;
+
+        detected_before_target = true;
+        is_attached = true;
+        is_satisfied = true;
+      } else {        
+        target_pos.x() = end_point.position.x() - (MARKER_OFFSET*station_vec.x());
+        target_pos.y() = end_point.position.y() - (MARKER_OFFSET*station_vec.y());         
+        target_pos.z() = end_point.position.z();
+      }
     }
 
     new_criteria = (target_pos - current_pos).norm();    
@@ -904,19 +967,26 @@ int main(int argc, char **argv)
 
     if (is_satisfied && !is_satisfied2) {
       if (is_detected) {
-        if (new_criteria <= align_thres && !is_attached2) {          
-          is_attached2 = true;
-          ROS_INFO("Attached to the marker target point");
-          s_T = ros::Time::now().toSec();
-        } else if (is_attached2) {
-          c_T = ros::Time::now().toSec();
-          if (c_T - s_T >= 2) {
-            is_satisfied2 = true;
-            ROS_INFO("Marker target point condition is satisfied");
+        if (new_criteria <= MARKER_TRHES) {          
+          if (is_attached2) {
+            c_T = ros::Time::now().toSec();
+            if (c_T - s_T >= MARKER_TIME) {
+              is_satisfied2 = true;
+              ros::param::set("/landing", true);
+              ROS_INFO("Marker target point condition is satisfied");
+            }
+          } else {
+            is_attached2 = true;            
+            ROS_INFO("Attached to the marker target point");
+            s_T = ros::Time::now().toSec();
           }
+        } else {
+          ROS_INFO("Initialized, Beyond Threshold");
+          is_attached2 = false;
         }
       } else {
-        c_T = 0;
+        s_T = ros::Time::now().toSec();
+        ROS_INFO("Initialized, Lost Marker");
       }
     }
 
@@ -961,7 +1031,7 @@ int main(int argc, char **argv)
     vel_com.twist.linear.y = vel_vector.y();
     if (is_attached && !is_satisfied) {
       c_T = ros::Time::now().toSec();
-      if (c_T - s_T >= 2) {
+      if (c_T - s_T >= UWB_TIME) {
         is_satisfied = true;        
         ROS_INFO("GPS target point condition is satisfied");
       }
@@ -984,6 +1054,12 @@ int main(int argc, char **argv)
     // std::cout << "aruco_detected: " << is_detected << std::endl;
     // std::cout << "---" << std::endl;
     
+    // if (j < 1.0) {
+    //   i += 1;
+    //   if (i % 20 == 0) {
+    //     j += 0.2;
+    //   }
+    // }
     local_vel_pub.publish(vel_com);
     ros::param::get("/loop_active", loop_active);
     ros::spinOnce();

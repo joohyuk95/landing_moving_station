@@ -71,7 +71,7 @@ std::mutex mtx;
 bool parallel = false;
 bool is_detected = false;
 double vel_gain = 5.0;
-double vel_offset = 2.0;
+double vel_offset = 3.0;
 double vz_max = 0.7;
 
 mavros_msgs::State current_state;
@@ -343,9 +343,9 @@ quadrotor_common::Trajectory getDynamicReferenceTrajectory2(quadrotor_common::Qu
   return dynamic_traj;
 }
 
-// double lowPassFilter(double current_value, double previous_value, double alpha) {
-//     return alpha * current_value + (1.0 - alpha) * previous_value;
-// }
+double lowPassFilter(double current_value, double previous_value, double alpha) {
+    return alpha * current_value + (1.0 - alpha) * previous_value;
+}
 
 visualization_msgs::MarkerArray visualizer(nav_msgs::Path& msg, int add) { // trajectory path components
     // Clear the previous marker array
@@ -721,7 +721,7 @@ int main(int argc, char **argv)
   }
 
 
-  PID pid_xy(1.5, 0.5, 0.1, vel_gain);
+  PID pid_xy(1.0, 0.5, 0.1, vel_gain);
   PID pid_z(0.8, 0.0, 0.1, vz_max);
 
   ROS_INFO("parallel flight!");  
@@ -739,11 +739,12 @@ int main(int argc, char **argv)
   Eigen::Vector3d vel_vector;
   Eigen::Vector3d vel_z;
 
-  // geometry_msgs::TwistStamped prev_vel_com = vel_com;
+  geometry_msgs::TwistStamped prev_vel_com = vel_com;
   // double new_criteria = (end_point.position - state_estimate.position).norm();
   criteria = std::sqrt(std::pow(end_point.position.x() - state_estimate.position.x(), 2) + std::pow(end_point.position.y() - state_estimate.position.y(), 2));
   double align_thres = 0.2;
   bool loop_active = true;
+  int decelGear;
   bool is_attached = false;  // is satisfied horizontal position threshold
   bool is_satisfied = false;  // duration after satisfied the condition
 
@@ -895,8 +896,21 @@ int main(int argc, char **argv)
     current_z.z() = current_pos.z();
 
     if (criteria <= transition_distance && !detected_before_target) {
-      double vel_limit = 0.8*((vel_gain + 0.5) + (criteria - transition_distance)/4);
-      vel_limit = std::max(vel_gain - 1.5, std::min(vel_limit, vel_gain));
+      if (criteria > 6.5) {
+        decelGear = 1;
+      } else if (criteria > 5) {
+        decelGear = 2;
+      } else if (criteria > 3.5) {
+        decelGear = 3;
+      } else if (criteria > 2) {
+        decelGear = 4;
+      } else {
+        decelGear = 5;
+      }
+
+      // double vel_limit = 0.8*((vel_gain + 0.5) + (criteria - transition_distance)/4);
+      double vel_limit = vel_gain - decelGear*0.5;
+      // vel_limit = std::max(vel_gain - 1.5, std::min(vel_limit, vel_gain));
       // std::cout << "vel: " << vel_limit << std::endl;
       pid_xy.setVMax(vel_limit);
     } else {
@@ -939,8 +953,10 @@ int main(int argc, char **argv)
 
     vel_com.header.stamp = ros::Time::now();
     vel_com.header.frame_id = "map";
-    vel_com.twist.linear.x = vel_vector.x();
-    vel_com.twist.linear.y = vel_vector.y();
+    vel_com.twist.linear.x = lowPassFilter(vel_vector.x(), prev_vel_com.twist.linear.x, 0.4);
+    vel_com.twist.linear.y = lowPassFilter(vel_vector.y(), prev_vel_com.twist.linear.y, 0.4);
+    // vel_com.twist.linear.x = vel_vector.x();
+    // vel_com.twist.linear.y = vel_vector.y();
     
     if (is_attached && !is_satisfied) {
       c_T = ros::Time::now().toSec();
@@ -967,7 +983,7 @@ int main(int argc, char **argv)
     // std::cout << "aruco_detected: " << is_detected << std::endl;
     // std::cout << "---" << std::endl;
     
-    // prev_vel_com = vel_com;
+    prev_vel_com = vel_com;
     local_vel_pub.publish(vel_com);
     ros::param::get("/loop_active", loop_active);
     ros::spinOnce();
